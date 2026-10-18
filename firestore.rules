@@ -2,7 +2,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
     // Change this to the same email as ADMIN_EMAIL in config.js
-    function adminEmail() { return 'owner@example.com'; }
+    function adminEmail() { return 'prabhu31105g@gmail.com'; }
 
     function signedIn() { return request.auth != null; }
     function profile() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data; }

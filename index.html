@@ -1027,7 +1027,15 @@ window.appBack=function(){ if($('#confirmHost').firstChild){ $('#confirmHost').i
 </script>
 
 <script>
-if('serviceWorker' in navigator && location.protocol==='https:'){ window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{})); }
+if('serviceWorker' in navigator && location.protocol==='https:'){
+  // Cache busting: check for a new version on every open and whenever the app comes back to the screen; reload once when it arrives.
+  let reloaded=false; const hadSW=!!navigator.serviceWorker.controller; // no reload on the very first visit
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{ if(reloaded||!hadSW) return; reloaded=true; location.reload(); });
+  window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).then(reg=>{
+    reg.update().catch(()=>{});
+    document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') reg.update().catch(()=>{}); });
+  }).catch(()=>{}));
+}
 </script>
 </body>
 </html>

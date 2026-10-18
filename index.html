@@ -324,6 +324,19 @@ tfoot td{font-weight:600}
       <button class="btn" type="button" id="btnExcel">Export to Excel (.xlsx)</button>
     </div>
     <div class="hint" id="backupMeta"></div>
+    <div id="driveBox" hidden style="display:flex;flex-direction:column;gap:8px;border-top:1px solid rgba(128,128,128,.25);padding-top:10px">
+      <b>Google Drive backup</b>
+      <div class="row">
+        <button class="btn" type="button" id="btnDriveNow">Back up to Google Drive now</button>
+        <button class="btn" type="button" id="btnDriveList">Restore from Google Drive</button>
+      </div>
+      <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="driveAuto"> Remind me daily and back up automatically when the app is open</label>
+      <div class="row" id="driveRestoreRow" hidden>
+        <select id="driveFiles" class="grow"></select>
+        <button class="btn danger" type="button" id="btnDriveRestore">Restore this backup</button>
+      </div>
+      <div class="hint" id="driveStatus"></div>
+    </div>
   </div>
 
   <div class="card" id="dangerCard" style="display:flex;flex-direction:column;gap:10px">
@@ -752,7 +765,9 @@ const SF={name:'#s-name',tagline:'#s-tagline',addr:'#s-addr',gstin:'#s-gstin',st
 function renderSettings(){ for(const [k,sel] of Object.entries(SF)) $(sel).value=DB.settings[k]??''; fillDatalists(); $('#backupMeta').textContent=`${DB.invoices.length} invoices · ${DB.parties.length} parties · ${DB.items.length} items`+(CLOUD?' in the shared database':' on this device'); if(CLOUD && ROLE==='admin' && window.renderUsers) window.renderUsers(); }
 $('#btnSaveSettings').onclick=()=>{ for(const [k,sel] of Object.entries(SF)){ const v=$(sel).value.trim(); DB.settings[k]= ['nextSeq','cgst','sgst','igst'].includes(k)? (+v||0) : v; } DB.settings.gstin=DB.settings.gstin.toUpperCase(); persist(); sync.settings(); applyBranding(); toast('Settings saved'); };
 function applyBranding(){ $('#topSub').textContent=DB.settings.name; $('#loginSub').textContent=DB.settings.name; $('#topLogo').src=LOGO; $('#loginLogo').src=LOGO; }
-$('#btnBackup').onclick=()=>deliver(`SMT-Billing-backup-${today()}.json`, JSON.stringify({app:'smt-billing',version:1,exportedAt:new Date().toISOString(),...DB},null,1), 'application/json');
+const backupJSON=()=>JSON.stringify({app:'smt-billing',version:1,exportedAt:new Date().toISOString(),...DB},null,1);
+$('#btnBackup').onclick=()=>deliver(`SMT-Billing-backup-${today()}.json`, backupJSON(), 'application/json');
+async function restoreData(d){ if(!d||!d.invoices||!d.settings) throw 0; if(await confirmBox('Restore this backup?',`It holds ${d.invoices.length} invoices. Everything currently stored will be replaced${CLOUD?' for every user':''}.`,'Restore',true)){ DB={settings:{...defaultSettings(),...d.settings},invoices:d.invoices,parties:d.parties||[],items:d.items||[],seedVersion:SEED_VERSION}; persist(); sync.replaceAll(); applyBranding(); toast('Backup restored'); show('invoices'); } }
 $('#fileJson').onchange=async e=>{ const f=e.target.files[0]; if(!f) return; try{ const d=JSON.parse(await f.text()); if(!d.invoices||!d.settings) throw 0; if(await confirmBox('Restore this backup?',`It holds ${d.invoices.length} invoices. Everything currently stored will be replaced${CLOUD?' for every user':''}.`,'Restore',true)){ DB={settings:{...defaultSettings(),...d.settings},invoices:d.invoices,parties:d.parties||[],items:d.items||[],seedVersion:SEED_VERSION}; persist(); sync.replaceAll(); applyBranding(); toast('Backup restored'); show('invoices'); } }catch(err){ toast('That file is not an SMT Billing backup.'); } e.target.value=''; };
 $('#btnRemoveSamples').onclick=async()=>{ const n=DB.invoices.filter(i=>i.sample).length; if(!n) return toast('No sample invoices left.'); if(await confirmBox('Remove sample invoices?',`${n} sample invoice(s) and their sample parties will be removed.`,'Remove',true)){ DB.invoices=DB.invoices.filter(i=>!i.sample); DB.parties=DB.parties.filter(p=>DB.invoices.some(i=>i.buyer?.name===p.name||i.consignee?.name===p.name)); persist(); sync.replaceAll(); toast('Samples removed'); renderSettings(); } };
 $('#btnWipe').onclick=async()=>{ if(await confirmBox('Erase all data?','All invoices, parties and settings on this phone will be deleted. Save a backup first.','Erase everything',true)){ DB={settings:defaultSettings(),invoices:[],parties:[],items:[],seedVersion:SEED_VERSION}; persist(); sync.replaceAll(); applyBranding(); toast('All data erased'); show('invoices'); } };
@@ -798,6 +813,87 @@ $('#btnExcel').onclick=()=>{
 function xd(iso){ if(!iso) return ''; const [y,m,d]=iso.split('-').map(Number); return new Date(y,m-1,d); }
 
 /* ---------- multi-user ---------- */
+/* ---------- Google Drive backup (admin). Needs window.GOOGLE_CLIENT_ID in config.js. Files go to "SMT Billing Backups" in the admin's Drive. ---------- */
+(function(){
+  const CID = window.GOOGLE_CLIENT_ID, KEEP = (window.DRIVE_BACKUP_KEEP_DAYS||30);
+  const FOLDER = 'SMT Billing Backups', API='https://www.googleapis.com/drive/v3', UP='https://www.googleapis.com/upload/drive/v3';
+  const LS = k => { try{ return localStorage.getItem('smt-drive-'+k); }catch(e){ return null; } };
+  const LSset = (k,v) => { try{ localStorage.setItem('smt-drive-'+k, v); }catch(e){} };
+  let token=null, tokenExp=0, tokenClient=null, folderId=null, busy=false, checked=false;
+  const status = t => { const el=$('#driveStatus'); if(el) el.textContent=t; };
+  const isAdmin = () => ROLE==='admin';
+  function showBox(){ const b=$('#driveBox'); if(b) b.hidden = !(CID && isAdmin()); const a=$('#driveAuto'); if(a) a.checked = LS('auto')!=='0'; const last=LS('last'); if(CID) status(last?('Last Drive backup: '+new Date(last).toLocaleString()):'No Drive backup yet from this device.'); }
+  window.driveShowBox = showBox;
+  if(!CID){ return; }
+  const gsi=document.createElement('script'); gsi.src='https://accounts.google.com/gsi/client'; gsi.async=true; document.head.appendChild(gsi);
+  function getToken(){
+    return new Promise((res,rej)=>{
+      if(token && Date.now()<tokenExp-60000) return res(token);
+      if(!window.google||!google.accounts||!google.accounts.oauth2) return rej(new Error('Google sign-in is still loading — try again in a moment.'));
+      tokenClient = google.accounts.oauth2.initTokenClient({ client_id:CID, scope:'https://www.googleapis.com/auth/drive.file',
+        login_hint: (window.ADMIN_EMAIL||''), callback: r=>{ if(r.error) return rej(new Error(r.error)); token=r.access_token; tokenExp=Date.now()+(+r.expires_in||3600)*1000; res(token); },
+        error_callback: e=>rej(new Error(e&&e.type==='popup_closed'?'Google sign-in was closed.':(e&&e.message)||'Google sign-in failed (allow pop-ups for this site).')) });
+      tokenClient.requestAccessToken({prompt: LS('consented')?'':'consent'});
+    });
+  }
+  async function gfetch(url, opt={}){
+    const t=await getToken(); opt.headers={...(opt.headers||{}), Authorization:'Bearer '+t};
+    const r=await fetch(url,opt); if(r.status===401){ token=null; throw new Error('Google session expired — tap again.'); }
+    if(!r.ok) throw new Error('Drive error '+r.status+': '+(await r.text()).slice(0,150)); return r.status===204?null:r.json();
+  }
+  async function ensureFolder(){
+    if(folderId) return folderId;
+    const q=encodeURIComponent(`name='${FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const l=await gfetch(`${API}/files?q=${q}&fields=files(id)`);
+    folderId = l.files.length ? l.files[0].id : (await gfetch(`${API}/files?fields=id`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:FOLDER,mimeType:'application/vnd.google-apps.folder'})})).id;
+    return folderId;
+  }
+  async function listBackups(){ const f=await ensureFolder(); const q=encodeURIComponent(`'${f}' in parents and trashed=false`); return (await gfetch(`${API}/files?q=${q}&orderBy=name desc&pageSize=200&fields=files(id,name,modifiedTime,size)`)).files; }
+  async function backupNow(silent){
+    if(busy) return; busy=true; status('Backing up to Google Drive…');
+    try{
+      if(!DB.invoices.length && !DB.parties.length) throw new Error('No data loaded yet — wait a few seconds and try again.');
+      const f=await ensureFolder(), name=`SMT-Billing-backup-${today()}.json`, body=backupJSON();
+      const existing=(await listBackups()).find(x=>x.name===name);
+      const meta = existing ? {} : {name, parents:[f], mimeType:'application/json'};
+      const fd=new FormData(); fd.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'})); fd.append('file',new Blob([body],{type:'application/json'}));
+      await gfetch(existing?`${UP}/files/${existing.id}?uploadType=multipart`:`${UP}/files?uploadType=multipart`,{method:existing?'PATCH':'POST',body:fd});
+      LSset('consented','1'); LSset('last',new Date().toISOString()); LSset('lastDay',today());
+      // keep the last KEEP days (always at least 7 files)
+      const all=await listBackups(), cutoff=new Date(Date.now()-KEEP*864e5).toISOString().slice(0,10);
+      for(const x of all.slice(7)){ const d=(x.name.match(/\d{4}-\d{2}-\d{2}/)||[''])[0]; if(d && d<cutoff) await gfetch(`${API}/files/${x.id}`,{method:'DELETE'}); }
+      status(`Backed up ${DB.invoices.length} invoices to Google Drive › ${FOLDER} › ${name} (${new Date().toLocaleTimeString()})`);
+      hideBanner(); if(!silent) toast('Backed up to Google Drive');
+    }catch(e){ status('Drive backup failed: '+e.message); if(!silent) toast('Drive backup failed'); }
+    finally{ busy=false; }
+  }
+  function hideBanner(){ const b=$('#driveBanner'); if(b) b.remove(); }
+  function showBanner(){
+    if($('#driveBanner')) return;
+    const b=document.createElement('div'); b.id='driveBanner'; b.className='card';
+    b.style.cssText='position:fixed;left:12px;right:12px;bottom:76px;z-index:60;display:flex;gap:8px;align-items:center;flex-wrap:wrap;box-shadow:0 6px 24px rgba(0,0,0,.25)';
+    b.innerHTML='<span class="grow" style="flex:1 1 180px">Today\'s Google Drive backup is pending.</span><button class="btn" type="button" id="bnDriveGo">Back up now</button><button class="btn small" type="button" id="bnDriveLater">Later</button>';
+    document.body.appendChild(b); $('#bnDriveGo').onclick=()=>backupNow(false); $('#bnDriveLater').onclick=hideBanner;
+  }
+  // called after invoices load
+  window.driveCheckDue = function(){
+    if(checked) return; if(!isAdmin() || (CLOUD && !USER)) return; checked=true; showBox();
+    if(LS('auto')==='0' || LS('lastDay')===today()) return;
+    if(token && Date.now()<tokenExp-60000) backupNow(true); else showBanner();
+  };
+  // UI wiring
+  const wire=()=>{
+    $('#btnDriveNow').onclick=()=>backupNow(false);
+    $('#driveAuto').onchange=e=>{ LSset('auto', e.target.checked?'1':'0'); if(!e.target.checked) hideBanner(); };
+    $('#btnDriveList').onclick=async()=>{ status('Reading backups from Google Drive…'); try{ const l=await listBackups(); LSset('consented','1'); if(!l.length){ status('No backups in Google Drive yet.'); return; }
+      $('#driveFiles').innerHTML=l.map(x=>`<option value="${x.id}">${esc(x.name)} · ${new Date(x.modifiedTime).toLocaleString()}</option>`).join(''); $('#driveRestoreRow').hidden=false; status(l.length+' backup(s) found in Google Drive › '+FOLDER); }catch(e){ status('Could not read Drive: '+e.message); } };
+    $('#btnDriveRestore').onclick=async()=>{ try{ const t=await getToken(); const r=await fetch(`${API}/files/${$('#driveFiles').value}?alt=media`,{headers:{Authorization:'Bearer '+t}}); if(!r.ok) throw new Error('Drive error '+r.status); await restoreData(await r.json()); }catch(e){ toast(e&&e.message?e.message:'That file is not an SMT Billing backup.'); } };
+  };
+  wire();
+  const _rs=window.renderSettings||renderSettings; // show box whenever Settings opens
+  renderSettings = function(){ _rs.apply(this,arguments); showBox(); };
+})();
+
 /* ---------- Multi-user mode (Firebase Auth + Firestore). Active only when config.js provides FIREBASE_CONFIG. ---------- */
 let USER=null, ROLE='admin', PROFILE=null, cloudIds={invoices:new Set(),parties:new Set(),items:new Set()}, unsub=[];
 const partyKey = p => encodeURIComponent(String(p.name||'').trim().toLowerCase());
@@ -844,7 +940,7 @@ if(CLOUD){
   function startListeners(){
     stopListeners();
     unsub.push(col('settings').doc('company').onSnapshot(d=>{ if(d.exists){ DB.settings={...defaultSettings(),...d.data()}; applyBranding(); if(current==='settings') renderSettings(); } }));
-    unsub.push(col('invoices').onSnapshot(s=>{ DB.invoices=s.docs.map(d=>d.data()); cloudIds.invoices=new Set(s.docs.map(d=>d.id)); refreshScreen(); maybeSeed(s); }));
+    unsub.push(col('invoices').onSnapshot(s=>{ DB.invoices=s.docs.map(d=>d.data()); cloudIds.invoices=new Set(s.docs.map(d=>d.id)); refreshScreen(); maybeSeed(s); if(window.driveCheckDue) setTimeout(driveCheckDue,4000); }));
     unsub.push(col('parties').onSnapshot(s=>{ DB.parties=s.docs.map(d=>d.data()); cloudIds.parties=new Set(s.docs.map(d=>d.id)); fillDatalists(); if(current==='parties') renderParties(); }));
     unsub.push(col('items').onSnapshot(s=>{ DB.items=s.docs.map(d=>d.data()); cloudIds.items=new Set(s.docs.map(d=>d.id)); fillDatalists(); if(current==='items') renderItems(); }));
   }

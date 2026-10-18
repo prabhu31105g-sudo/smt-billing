@@ -5,7 +5,7 @@ const SHELL=['./','./index.html','./config.js','./manifest.webmanifest','./icon-
  'https://cdn.jsdelivr.net/npm/firebase@10.14.1/firebase-app-compat.js',
  'https://cdn.jsdelivr.net/npm/firebase@10.14.1/firebase-auth-compat.js',
  'https://cdn.jsdelivr.net/npm/firebase@10.14.1/firebase-firestore-compat.js'];
-const NEVER_CACHE=/googleapis\.com|firebaseio\.com|firebase\.com|gstatic\.com\/firebasejs|identitytoolkit/;
+const NEVER_CACHE=/googleapis\.com|firebaseio\.com|firebase\.com|gstatic\.com\/firebasejs|identitytoolkit|accounts\.google\.com/;
 self.addEventListener('install',e=>{ e.waitUntil(caches.open(VERSION).then(c=>Promise.allSettled(SHELL.map(u=>c.add(u)))).then(()=>self.skipWaiting())); });
 self.addEventListener('activate',e=>{ e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==VERSION).map(k=>caches.delete(k)))).then(()=>self.clients.claim())); });
 self.addEventListener('fetch',e=>{

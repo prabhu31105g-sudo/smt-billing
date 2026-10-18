@@ -11,3 +11,8 @@ window.FIREBASE_CONFIG = {
 };
 // 2) The admin's email. This address can create its own account on first sign-in and always has admin rights.
 window.ADMIN_EMAIL = "prabhu31105g@gmail.com";
+
+// 3) Google Drive backup — paste the OAuth Client ID from Google Cloud (APIs & Services > Credentials).
+//    Leave it as "" to hide the Google Drive backup buttons.
+window.GOOGLE_CLIENT_ID = "718905299308-qgk4a1m4udi8edkooaesvg1inpabbvkt.apps.googleusercontent.com";
+window.DRIVE_BACKUP_KEEP_DAYS = 30;   // older backups in Drive are deleted automatically

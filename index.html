@@ -103,6 +103,12 @@ nav.tabs button[aria-current="page"]{color:var(--accent);border-top-color:var(--
 .bar{height:8px;background:#e8f0fc;border-radius:4px;overflow:hidden;min-width:60px}.bar i{display:block;height:100%;background:var(--accent)}
 td.bar-cell{min-width:90px;vertical-align:middle}
 .rep h3{font-size:15px;margin:4px 0 0}
+.syncpill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.5)!important;border-radius:999px!important;padding:5px 10px!important;font-size:12.5px!important;white-space:nowrap}
+.syncpill .dot{width:9px;height:9px;border-radius:50%;background:#9aa4ad;flex:none;box-shadow:0 0 0 2px rgba(255,255,255,.35)}
+.syncpill[data-st="ok"] .dot{background:#3ddc84}.syncpill[data-st="busy"] .dot{background:#ffc107;animation:pulse 1s infinite}.syncpill[data-st="off"] .dot,.syncpill[data-st="err"] .dot{background:#ff5a4f}
+@keyframes pulse{50%{opacity:.35}}
+#btnSignOut .so-i{display:none}
+@media (max-width:420px){#whoami{display:none}#btnSignOut .so-t{display:none}#btnSignOut .so-i{display:inline;font-size:15px}#btnSignOut{padding:5px 9px!important}.topbar{gap:8px}.topbar img{height:36px}}
 .chip.sample{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
 .fab{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(72px + env(safe-area-inset-bottom,0px));z-index:6;background:var(--accent);color:var(--accent-fg);border:0;border-radius:999px;padding:12px 18px;font-weight:700;font-size:15px;box-shadow:var(--shadow);display:inline-flex;align-items:center;gap:6px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
@@ -156,7 +162,8 @@ tfoot td{font-weight:600}
   <img id="topLogo" alt="">
   <h1 id="topTitle">SMT Billing<span class="sub" id="topSub">Sri Muthalamman Traders</span></h1>
   <span class="sub" id="whoami" style="font-size:12px;opacity:.85;max-width:38vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-  <button id="btnSignOut" hidden type="button">Sign out</button>
+  <button id="syncBtn" class="syncpill" hidden type="button" title="Database status — tap to sync now" data-st="busy"><span class="dot"></span><span id="syncTxt">Connecting…</span></button>
+  <button id="btnSignOut" hidden type="button" title="Sign out" aria-label="Sign out"><span class="so-t">Sign out</span><span class="so-i" aria-hidden="true">⏻</span></button>
   <button id="btnBackTop" hidden type="button">Back</button>
 </header>
 
@@ -1151,6 +1158,7 @@ function applyRole(){
   $('#btnDelInv').hidden=!admin;
   $('#whoami').textContent = USER ? (PROFILE?.name||USER.email) : '';
   $('#btnSignOut').hidden = !USER;
+  if(window.syncUI) window.syncUI(); else { const sb=$('#syncBtn'); if(sb) sb.hidden=true; }
 }
 function refreshScreen(){
   fillDatalists();
@@ -1167,13 +1175,45 @@ if(CLOUD){
   window.fsSet=(id,data)=>col('settings').doc(id).set(data);
   window.fsDel=id=>col('settings').doc(id).delete();
   const stamp=o=>({...o, updatedBy:USER?USER.email:'', updatedAt:Date.now()});
+  /* ---- database status: Online & saved / Saving / Offline / Error, and a Sync-now button ---- */
+  const SY={pend:0, server:false, last:0, err:'', syncing:false};
+  const hhmm=t=>t?new Date(t).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'';
+  function syncUI(){
+    const b=$('#syncBtn'); if(!b) return; b.hidden=!USER;
+    let st,txt,tip;
+    if(SY.err){ st='err'; txt='Not saved!'; tip='Last save failed: '+SY.err+' — tap to retry'; }
+    else if(SY.syncing){ st='busy'; txt='Syncing…'; tip='Checking with Firebase'; }
+    else if(!navigator.onLine || !SY.server){ st='off'; txt=SY.pend?`Offline · ${SY.pend} pending`:'Offline'; tip='No connection to Firebase. Changes are kept on this device and upload automatically when online.'; }
+    else if(SY.pend){ st='busy'; txt=`Saving ${SY.pend}…`; tip='Uploading changes to Firebase'; }
+    else { st='ok'; txt=SY.last?'Synced '+hhmm(SY.last):'Online'; tip='Online — all changes are saved in Firebase. Tap to sync now.'; }
+    b.dataset.st=st; $('#syncTxt').textContent=txt; b.title=tip;
+  }
+  window.syncUI=syncUI;
+  const track=pr=>{ SY.pend++; SY.err=''; syncUI(); return pr.then(v=>{ SY.pend=Math.max(0,SY.pend-1); SY.last=Date.now(); syncUI(); return v; }, e=>{ SY.pend=Math.max(0,SY.pend-1); SY.err=e.message||String(e); syncUI(); throw e; }); };
+  window.addEventListener('online',()=>{ fs.enableNetwork().catch(()=>{}); syncUI(); }); window.addEventListener('offline',syncUI);
+  async function syncNow(){
+    if(SY.syncing) return; if(!USER) return;
+    SY.syncing=true; SY.err=''; syncUI();
+    const timeout=ms=>new Promise((_,rej)=>setTimeout(()=>rej(new Error('Firebase did not answer in time')),ms));
+    try{
+      await fs.enableNetwork();
+      await Promise.race([fs.waitForPendingWrites(), timeout(20000)]);
+      const [inv,par,itm]=await Promise.race([Promise.all(['invoices','parties','items'].map(c=>col(c).get({source:'server'}))), timeout(20000)]);
+      SY.server=true; SY.pend=0; SY.last=Date.now();
+      const same = inv.size===DB.invoices.length;
+      toast(`Synced with Firebase · ${inv.size} invoices, ${par.size} parties, ${itm.size} items on the server${same?'':' — refreshing this device'}`);
+      if(!same) startListeners();
+    }catch(e){ SY.server=false; toast((navigator.onLine?'Could not reach Firebase: '+(e.message||e):'You are offline')+'. Changes stay on this device and upload when the connection returns.'); }
+    finally{ SY.syncing=false; syncUI(); }
+  }
+  $('#syncBtn').onclick=syncNow;
 
-  sync.invoice=(inv,changed)=>{ const b=fs.batch(); if(!inv.createdBy) inv.createdBy=USER?USER.email:''; b.set(col('invoices').doc(inv.id),stamp(inv)); (changed?.parties||[]).forEach(p=>b.set(col('parties').doc(partyKey(p)),stamp(p))); (changed?.items||[]).forEach(it=>b.set(col('items').doc(itemKey(it)),stamp(it))); b.commit().catch(err=>toast('Not saved to the shared database: '+err.message)); };
-  sync.deleteInvoice=id=>col('invoices').doc(id).delete().catch(err=>toast('Delete failed: '+err.message));
-  sync.party=(p,oldName)=>{ const b=fs.batch(); if(oldName && partyKey({name:oldName})!==partyKey(p)) b.delete(col('parties').doc(partyKey({name:oldName}))); b.set(col('parties').doc(partyKey(p)),stamp(p)); b.commit().catch(err=>toast('Not saved: '+err.message)); };
-  sync.deleteParty=name=>col('parties').doc(partyKey({name})).delete().catch(()=>{});
-  sync.deleteItem=desc=>col('items').doc(itemKey({desc})).delete().catch(()=>{});
-  sync.settings=()=>col('settings').doc('company').set(stamp(DB.settings)).catch(err=>toast('Settings not saved: '+err.message));
+  sync.invoice=(inv,changed)=>{ const b=fs.batch(); if(!inv.createdBy) inv.createdBy=USER?USER.email:''; b.set(col('invoices').doc(inv.id),stamp(inv)); (changed?.parties||[]).forEach(p=>b.set(col('parties').doc(partyKey(p)),stamp(p))); (changed?.items||[]).forEach(it=>b.set(col('items').doc(itemKey(it)),stamp(it))); track(b.commit()).catch(err=>toast('Not saved to the shared database: '+err.message)); };
+  sync.deleteInvoice=id=>track(col('invoices').doc(id).delete()).catch(err=>toast('Delete failed: '+err.message));
+  sync.party=(p,oldName)=>{ const b=fs.batch(); if(oldName && partyKey({name:oldName})!==partyKey(p)) b.delete(col('parties').doc(partyKey({name:oldName}))); b.set(col('parties').doc(partyKey(p)),stamp(p)); track(b.commit()).catch(err=>toast('Not saved: '+err.message)); };
+  sync.deleteParty=name=>track(col('parties').doc(partyKey({name})).delete()).catch(()=>{});
+  sync.deleteItem=desc=>track(col('items').doc(itemKey({desc})).delete()).catch(()=>{});
+  sync.settings=()=>track(col('settings').doc('company').set(stamp(DB.settings))).catch(err=>toast('Settings not saved: '+err.message));
   sync.replaceAll=async()=>{
     // make the shared database equal to DB: set every record, delete what is no longer there
     const ops=[];
@@ -1183,12 +1223,13 @@ if(CLOUD){
     ops.push(['set','settings','company',stamp(DB.settings)]);
     const keep={invoices:new Set(DB.invoices.map(i=>i.id)),parties:new Set(DB.parties.map(partyKey)),items:new Set(DB.items.map(itemKey))};
     for(const c of ['invoices','parties','items']) cloudIds[c].forEach(id=>{ if(!keep[c].has(id)) ops.push(['del',c,id]); });
-    try{ for(let i=0;i<ops.length;i+=400){ const b=fs.batch(); ops.slice(i,i+400).forEach(([op,c,id,data])=>op==='set'?b.set(col(c).doc(id),data):b.delete(col(c).doc(id))); await b.commit(); } toast('Shared database updated'); }
+    try{ for(let i=0;i<ops.length;i+=400){ const b=fs.batch(); ops.slice(i,i+400).forEach(([op,c,id,data])=>op==='set'?b.set(col(c).doc(id),data):b.delete(col(c).doc(id))); await track(b.commit()); } toast('Shared database updated'); }
     catch(err){ toast('Database update failed: '+err.message); }
   };
 
   function startListeners(){
     stopListeners();
+    unsub.push(col('invoices').onSnapshot({includeMetadataChanges:true}, s=>{ SY.server=!s.metadata.fromCache; if(SY.server && !s.metadata.hasPendingWrites && !SY.pend && !SY.last) SY.last=Date.now(); syncUI(); }, ()=>{ SY.server=false; syncUI(); }));
     unsub.push(col('settings').doc('company').onSnapshot(d=>{ if(d.exists){ DB.settings={...defaultSettings(),...d.data()}; applyBranding(); if(current==='settings') renderSettings(); } }));
     unsub.push(col('invoices').onSnapshot(s=>{ DB.invoices=s.docs.map(d=>d.data()); cloudIds.invoices=new Set(s.docs.map(d=>d.id)); refreshScreen(); maybeSeed(s); if(window.driveCheckDue) setTimeout(driveCheckDue,4000); }));
     unsub.push(col('parties').onSnapshot(s=>{ DB.parties=s.docs.map(d=>d.data()); cloudIds.parties=new Set(s.docs.map(d=>d.id)); fillDatalists(); if(current==='parties') renderParties(); }));

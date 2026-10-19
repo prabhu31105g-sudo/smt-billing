@@ -1,6 +1,6 @@
 // SMT Billing service worker — network-first for the app's own files (always the latest version when online),
 // cached copy only when offline. Bump VERSION on each release to clear old caches.
-const VERSION='smt-billing-v6';
+const VERSION='smt-billing-v7';
 const APP_FILES=['./','./index.html','./config.js','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
 const LIBS=['https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
  'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
